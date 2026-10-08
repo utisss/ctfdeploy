@@ -4,10 +4,14 @@ on:
   workflow_call:
     inputs:
       host:
-        description: The CTF host `main` deploys to, e.g. ctf.isss.io. Also the GitHub environment
-          holding its DEPLOY_SSH_KEY secret and KNOWN_HOSTS variable.
+        description: The CTF host `main` deploys to, e.g. ctf.isss.io. Its host key must be in the
+          caller's KNOWN_HOSTS variable.
         type: string
         required: true
+    secrets:
+      deploy-key:
+        description: The SSH key whose forced command on the host runs `ctfdeploy reconcile`
+        required: false
 
 defaults:
   run:
@@ -95,10 +99,14 @@ jobs:
     steps:
       - name: Reconcile ${{ inputs.host }}
         env:
-          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          SSH_KEY: ${{ secrets.deploy-key }}
           KNOWN_HOSTS: ${{ vars.KNOWN_HOSTS }}
           HOST: ${{ inputs.host }}
         run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error title=Deploy::no deploy key: pass secrets.deploy-key to the challenges workflow"
+            exit 1
+          fi
           mkdir -p ~/.ssh
           echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
           (umask 077; echo "$SSH_KEY" > ~/.ssh/id_ed25519)

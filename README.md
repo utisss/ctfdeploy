@@ -34,10 +34,12 @@ jobs:
     uses: utisss/ctfdeploy/.github/workflows/challenges.yml@<tag>
     with:
       host: ctf.isss.io
+    secrets:
+      deploy-key: ${{ secrets.DEPLOY_SSH_PRIVKEY }}
 ```
 
-The GitHub environment named after the host holds the `DEPLOY_SSH_KEY` secret and the
-`KNOWN_HOSTS` variable.
+The repo's `KNOWN_HOSTS` variable holds the host's SSH key. Deploys run in a GitHub environment
+named after the host, so its Deployments page shows what is live.
 
 ## Development
 
