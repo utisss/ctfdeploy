@@ -36,6 +36,7 @@ jobs:
       host: ctf.isss.io
     secrets:
       deploy-key: ${{ secrets.DEPLOY_SSH_PRIVKEY }}
+      discord-webhook: ${{ secrets.WEBHOOK_URL }}  # optional: failures on main
 ```
 
 The repo's `KNOWN_HOSTS` variable holds the host's SSH key. Deploys run in a GitHub environment

@@ -12,6 +12,9 @@ on:
       deploy-key:
         description: The SSH key whose forced command on the host runs `ctfdeploy reconcile`
         required: false
+      discord-webhook:
+        description: A Discord webhook URL that hears about failures on the default branch
+        required: false
 
 defaults:
   run:
@@ -116,3 +119,19 @@ jobs:
         run: |
           sed -n '/^::ctfdeploy-summary::$/,/^::ctfdeploy-summary::$/{//!p}' reconcile.log \
             >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    name: Notify
+    needs: [check, test, deploy]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK: ${{ secrets.discord-webhook }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$WEBHOOK" ] || exit 0
+          message="❌ **$GITHUB_REPOSITORY** challenges failed on \`${GITHUB_SHA::7}\` ($GITHUB_ACTOR): $RUN_URL"
+          jq -n --arg content "$message" '{content: $content}' \
+            | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK"
