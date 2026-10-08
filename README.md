@@ -10,7 +10,7 @@ at `main` and the clock, so one idempotent command, `ctfdeploy reconcile`, conve
 | --- | --- | --- |
 | `check [REPO]` | CI, host | Validates `ctfs.yml` and every challenge that is up or to come |
 | `changed BASE [REPO]` | CI | Lists hosted challenges that differ from `BASE`, as JSON |
-| `build DIR`, `up DIR`, `probe DIR`, `solve DIR` | CI, locally | Tests one challenge on a local swarm |
+| `build DIR`, `up DIR`, `probe DIR`, `solve DIR`, `logs DIR` | CI, locally | Tests one challenge on a local swarm |
 | `reconcile [--fetch] [REPO]` | Host | Deploys, syncs CTFd, removes what is no longer wanted |
 
 `--github` before the command prints GitHub Actions groups, annotations and a summary; it is on

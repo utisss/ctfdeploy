@@ -8,7 +8,7 @@ from pathlib import Path
 from ctfdeploy import docker
 from ctfdeploy.changed import changed_hosted
 from ctfdeploy.check import check
-from ctfdeploy.ctfd import Ctfd, CtfdError
+from ctfdeploy.ctfd import Ctfd
 from ctfdeploy.docker import StepFailed
 from ctfdeploy.model import CHALLENGE_FILE, META_FILE, Challenge, RepoError, load_repo
 from ctfdeploy.problem import Problem
@@ -23,6 +23,7 @@ PHASES = {
     "up": lambda c: docker.deploy(c, c.version()),
     "probe": docker.probe,
     "solve": solve,
+    "logs": docker.logs,
 }
 
 
@@ -61,6 +62,7 @@ def _parser() -> argparse.ArgumentParser:
         ("up", "deploy a challenge's stack and wait until it is healthy"),
         ("probe", "connect to each port a challenge publishes"),
         ("solve", "run a challenge's solve.py against it"),
+        ("logs", "print a deployed challenge's tasks and service logs"),
     ]:
         sub = commands.add_parser(phase, help=text)
         sub.add_argument("path", type=Path, metavar="DIR")
@@ -89,7 +91,7 @@ def cmd_reconcile(args, root: Path, report: Report) -> int:
     ctfd = Ctfd(os.environ.get("CTFD_URL", "unix:/run/ctfd/ctfd.sock"), os.environ["CTFD_TOKEN"])
     try:
         return reconcile(root, ctfd, report, args.fetch)
-    except (CtfdError, StepFailed) as e:
+    except StepFailed as e:
         report.error(str(e), title="reconcile")
         return FATAL
 
@@ -97,7 +99,7 @@ def cmd_reconcile(args, root: Path, report: Report) -> int:
 def cmd_phase(args, path: Path, report: Report) -> int:
     challenge = _find_challenge(path)
     title = f"{challenge.slug}: {args.command}"
-    if args.command in ("build", "up", "probe") and not challenge.compose:
+    if args.command != "solve" and not challenge.compose:
         report.error("the challenge has no compose file", title)
         return 1
     try:

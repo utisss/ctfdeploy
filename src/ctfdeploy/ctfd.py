@@ -1,7 +1,9 @@
 import httpx
 
+from ctfdeploy.docker import StepFailed
 
-class CtfdError(Exception):
+
+class CtfdError(StepFailed):
     pass
 
 

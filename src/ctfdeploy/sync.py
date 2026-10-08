@@ -7,7 +7,6 @@ from ctfdeploy.ctfd import Ctfd, CtfdError
 from ctfdeploy.model import Challenge, Event, Repo
 
 DYNAMIC = ("initial", "decay", "minimum", "function")
-FLAG = ("type", "content", "data")
 
 
 def sync_challenge(
@@ -90,53 +89,54 @@ def _fields(challenge: Challenge, visible: bool) -> dict:
 
 
 def _sync_flags(ctfd: Ctfd, cid: int, challenge: Challenge) -> list[str]:
-    def key(flag) -> tuple:
-        if isinstance(flag, dict):
-            return flag.get("type", "static"), flag["content"], flag.get("data") or None
-        return "static", str(flag), None
-
-    wanted = {key(f) for f in challenge.spec["flags"]}
-    return _sync_set(ctfd, cid, "flags", wanted, key, lambda k: dict(zip(FLAG, k, strict=True)))
+    flags = challenge.spec["flags"]
+    wanted = [
+        {"type": "static", "data": None} | (f if isinstance(f, dict) else {"content": str(f)})
+        for f in flags
+    ]
+    return _sync_set(ctfd, cid, "flags", wanted, ("type", "content", "data"))
 
 
 def _sync_hints(ctfd: Ctfd, cid: int, challenge: Challenge) -> list[str]:
-    def key(hint) -> tuple:
-        if isinstance(hint, dict):
-            return hint["content"], hint.get("cost", 0)
-        return str(hint), 0
-
-    wanted = {key(h) for h in challenge.spec.get("hints") or []}
-    return _sync_set(ctfd, cid, "hints", wanted, key, lambda k: {"content": k[0], "cost": k[1]})
+    hints = challenge.spec.get("hints") or []
+    wanted = [{"cost": 0} | (h if isinstance(h, dict) else {"content": str(h)}) for h in hints]
+    return _sync_set(ctfd, cid, "hints", wanted, ("content", "cost"))
 
 
 def _sync_tags(ctfd: Ctfd, cid: int, challenge: Challenge) -> list[str]:
-    wanted = {str(t) for t in challenge.spec.get("tags") or []}
-    return _sync_set(
-        ctfd, cid, "tags", wanted, lambda t: t if isinstance(t, str) else t["value"],
-        lambda k: {"value": k},
-    )  # fmt: skip
+    wanted = [{"value": str(t)} for t in challenge.spec.get("tags") or []]
+    return _sync_set(ctfd, cid, "tags", wanted, ("value",))
 
 
-def _sync_set(ctfd: Ctfd, cid: int, kind: str, wanted: set, key, to_body) -> list[str]:
+def _sync_set(ctfd: Ctfd, cid: int, kind: str, wanted: list[dict], fields: tuple) -> list[str]:
+    """Make a challenge's flags, hints or tags equal `wanted`, compared on `fields`."""
+
+    def key(item: dict) -> tuple:
+        return tuple(item.get(f) or None for f in fields)
+
+    wanted_by_key = {key(item): item for item in wanted}
     current = {key(item): item["id"] for item in ctfd.get(f"/challenges/{cid}/{kind}")}
-    for stale in current.keys() - wanted:
+    for stale in current.keys() - wanted_by_key.keys():
         ctfd.delete(f"/{kind}/{current[stale]}")
-    for missing in wanted - current.keys():
-        ctfd.post(f"/{kind}", {"challenge": cid, **to_body(missing)})
-    return [kind] if current.keys() != wanted else []
+    for missing in wanted_by_key.keys() - current.keys():
+        ctfd.post(f"/{kind}", {"challenge": cid, **wanted_by_key[missing]})
+    return [kind] if current.keys() != wanted_by_key.keys() else []
 
 
 def _sync_files(ctfd: Ctfd, cid: int, challenge: Challenge) -> list[str]:
-    wanted = {Path(name).name: challenge.path / name for name in challenge.spec.get("files") or []}
-    digests = {name: hashlib.sha1(path.read_bytes()).hexdigest() for name, path in wanted.items()}
-    current = {Path(f["location"]).name: f for f in ctfd.get(f"/challenges/{cid}/files")}
-    stale = [f for name, f in current.items() if digests.get(name) != f["sha1sum"]]
-    missing = [name for name in wanted if name not in current or current[name] in stale]
-    for f in stale:
-        ctfd.delete(f"/files/{f['id']}")
-    for name in missing:
-        with wanted[name].open("rb") as fh:
+    paths = [challenge.path / name for name in challenge.spec.get("files") or []]
+    wanted = {(p.name, hashlib.sha1(p.read_bytes()).hexdigest()): p for p in paths}
+    current = {
+        (Path(f["location"]).name, f["sha1sum"]): f["id"]
+        for f in ctfd.get(f"/challenges/{cid}/files")
+    }
+    for stale in current.keys() - wanted.keys():
+        ctfd.delete(f"/files/{current[stale]}")
+    for missing in wanted.keys() - current.keys():
+        with wanted[missing].open("rb") as fh:
             ctfd.post(
-                "/files", files={"file": (name, fh)}, data={"challenge": cid, "type": "challenge"}
+                "/files",
+                files={"file": (missing[0], fh)},
+                data={"challenge": cid, "type": "challenge"},
             )
-    return ["files"] if stale or missing else []
+    return ["files"] if current.keys() != wanted.keys() else []

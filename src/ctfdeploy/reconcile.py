@@ -1,6 +1,5 @@
 import fcntl
 import os
-import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -8,9 +7,9 @@ from pathlib import Path
 
 from ctfdeploy import docker
 from ctfdeploy.check import check
-from ctfdeploy.ctfd import Ctfd, CtfdError
+from ctfdeploy.ctfd import Ctfd
 from ctfdeploy.docker import StepFailed
-from ctfdeploy.model import CHALLENGE_FILE, Challenge, RepoError, load_repo
+from ctfdeploy.model import CHALLENGE_FILE, Challenge, git, load_repo
 from ctfdeploy.notify import notify_changes
 from ctfdeploy.problem import Problem
 from ctfdeploy.report import Report
@@ -23,14 +22,21 @@ class Outcome:
     challenge: Challenge
     stack: str
     ctfd: str = ""
-    failure: str = ""
+    cid: int | None = None
+    phase: str = ""
+    problems: list[Problem] = field(default_factory=list)
     log: list[str] = field(default_factory=list)
+
+    @property
+    def failure(self) -> str:
+        return self.problems[0].message if self.problems else ""
 
 
 def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
     with _lock(root):
         if fetch:
-            _fetch(root)
+            git(root, "fetch", "--quiet")
+            git(root, "reset", "--quiet", "--hard", "@{upstream}")
         repo = load_repo(root)
         now = datetime.now(UTC)
         desired = desired_events(repo.events, now)
@@ -42,23 +48,38 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
 
         hosted = {c.stack for c, _ in wanted if c.compose}
         for stack in sorted(deployed.keys() - hosted):
-            _step(report, failures, stack, "removed", lambda s=stack: docker.remove(s))
+            with _step(report, failures, stack):
+                report.group(f"✓ {stack}  removed", docker.remove(stack))
 
-        outcomes = [
-            _reconcile_one(ctfd, c, v, deployed, ids, report, _problems_in(c, problems))
-            for c, v in wanted
-        ]
-        failures |= {o.challenge.slug: o.failure for o in outcomes if o.failure}
+        outcomes = []
+        for challenge, visible in wanted:
+            print(f"{challenge.slug}: reconciling", flush=True)
+            outcome = _reconcile_one(
+                ctfd,
+                challenge,
+                visible,
+                deployed.get(challenge.stack),
+                ids.get(challenge.name),
+                [p for p in problems if p.path.is_relative_to(challenge.path)],
+            )
+            if outcome.cid:
+                ids[challenge.name] = outcome.cid
+            if outcome.failure:
+                failures[challenge.slug] = outcome.failure
+            _report(report, outcome)
+            outcomes.append(outcome)
 
         in_repo = {c.name for e in repo.events for c in e.challenges}
         for name in sorted((in_repo - {c.name for c, _ in wanted}) & ids.keys()):
-            _step(report, failures, f"ctfd: {name}", "deleted",
-                  lambda n=name: ctfd.delete(f"/challenges/{ids.pop(n)}"))  # fmt: skip
-        _step(report, failures, "ctfd: next", "linked",
-              lambda: link_next(ctfd, [c for c, _ in wanted], ids))  # fmt: skip
-        _step(report, failures, "ctfd: config", desired.config.name,
-              lambda: sync_config(ctfd, repo, desired.config))  # fmt: skip
-        _step(report, failures, "images", "pruned", docker.prune_images)
+            with _step(report, failures, f"ctfd: {name}"):
+                ctfd.delete(f"/challenges/{ids[name]}")
+                del ids[name]
+                report.group(f"✓ ctfd: {name}  deleted", "")
+        with _step(report, failures, "ctfd: next"):
+            report.group("✓ ctfd: next  linked", link_next(ctfd, [c for c, _ in wanted], ids))
+        with _step(report, failures, "ctfd: config"):
+            changed = sync_config(ctfd, repo, desired.config)
+            report.group(f"✓ ctfd: config  {desired.config.name}", changed)
 
     if report.github:
         report.summary(_summary(desired.events, outcomes))
@@ -84,87 +105,69 @@ def _reconcile_one(
     ctfd: Ctfd,
     challenge: Challenge,
     visible: bool,
-    deployed: dict,
-    ids: dict,
-    report: Report,
+    tags: set[str] | None,
+    cid: int | None,
     problems: list[Problem],
 ) -> Outcome:
     """Deploy then sync one challenge. One that fails `check` is left as it is."""
-    print(f"{challenge.slug}: reconciling", flush=True)
     outcome = Outcome(challenge, stack="—" if challenge.compose else "not hosted")
-    for problem in problems:
-        report.problem(problem, title=f"{challenge.slug}: check")
     if problems:
-        outcome.failure = f"check: {problems[0].message}"
-    else:
-        _deploy_and_sync(ctfd, challenge, visible, deployed, ids, report, outcome)
-    mark = "✗" if outcome.failure else "✓"
-    detail = outcome.failure or f"{outcome.stack}, ctfd {outcome.ctfd}"
-    report.group(f"{mark} {challenge.slug}  {detail}", "\n".join(outcome.log))
+        outcome.phase, outcome.problems = "check", problems
+        return outcome
+    try:
+        if challenge.compose:
+            outcome.phase = "deploy"
+            outcome.stack = _deploy(challenge, tags, outcome.log)
+        outcome.phase = "ctfd"
+        outcome.cid, outcome.ctfd = sync_challenge(ctfd, challenge, visible, cid)
+    except StepFailed as e:
+        file = challenge.compose if outcome.phase == "deploy" else challenge.path / CHALLENGE_FILE
+        outcome.problems = [Problem(file, 1, str(e))]
+        outcome.log.append(e.log)
     return outcome
 
 
-def _deploy_and_sync(
-    ctfd: Ctfd,
-    challenge: Challenge,
-    visible: bool,
-    deployed: dict,
-    ids: dict,
-    report: Report,
-    outcome: Outcome,
-) -> None:
-    phase, file = "deploy", challenge.compose
-    try:
-        if challenge.compose:
-            outcome.stack = _deploy(challenge, deployed.get(challenge.stack), outcome.log)
-        phase, file = "ctfd", challenge.path / CHALLENGE_FILE
-        ids[challenge.name], outcome.ctfd = sync_challenge(
-            ctfd, challenge, visible, ids.get(challenge.name)
-        )
-    except (StepFailed, CtfdError) as e:
-        outcome.failure = str(e)
-        outcome.log.append(getattr(e, "log", ""))
-        report.problem(Problem(file, 1, outcome.failure), title=f"{challenge.slug}: {phase}")
-
-
-def _problems_in(challenge: Challenge, problems: list[Problem]) -> list[Problem]:
-    return [p for p in problems if p.path.is_relative_to(challenge.path)]
-
-
-def _deploy(challenge: Challenge, deployed: set[str] | None, log: list[str]) -> str:
+def _deploy(challenge: Challenge, tags: set[str] | None, log: list[str]) -> str:
     version = challenge.version()
-    if deployed == {version}:
+    if tags == {version}:
         return f"up to date {version}"
     log.append(docker.build(challenge, version))
     log.append(docker.deploy(challenge, version))
     return f"deployed {version}"
 
 
-def _step(report: Report, failures: dict, key: str, done: str, action) -> None:
+def _report(report: Report, outcome: Outcome) -> None:
+    slug = outcome.challenge.slug
+    for problem in outcome.problems:
+        report.problem(problem, title=f"{slug}: {outcome.phase}")
+    mark = "✗" if outcome.failure else "✓"
+    detail = outcome.failure or f"{outcome.stack}, ctfd {outcome.ctfd}"
+    report.group(f"{mark} {slug}  {detail}", "\n".join(outcome.log))
+
+
+@contextmanager
+def _step(report: Report, failures: dict[str, str], key: str):
+    """A host-wide step whose failure is recorded without stopping the run."""
     try:
-        result = action()
-        report.group(f"✓ {key}  {done}", result if isinstance(result, str) else "")
-    except (StepFailed, CtfdError) as e:
+        yield
+    except StepFailed as e:
         failures[key] = str(e)
         report.error(str(e), title=key)
 
 
 def _summary(events, outcomes: list[Outcome]) -> str:
     phases = ", ".join(f"{e.name} ({'visible' if v else 'hidden'})" for e, v in events)
-    rows = [
-        " | ".join(["", "✗" if o.failure else "✓", f"`{o.challenge.slug}`", o.stack, o.ctfd,
-                    o.failure.replace("|", "\\|"), ""]).strip()
-        for o in outcomes
-    ]  # fmt: skip
     head = ["| | Challenge | Stack | CTFd | Failure |", "| --- | --- | --- | --- | --- |"]
+    rows = [
+        f"| {'✗' if o.failure else '✓'} | `{o.challenge.slug}` | {o.stack} | {o.ctfd} "
+        f"| {_cell(o.failure)} |"
+        for o in outcomes
+    ]
     return "\n".join([f"**Events:** {phases}", "", *head, *rows])
 
 
-def _fetch(root: Path) -> None:
-    for cmd in (["git", "fetch", "--quiet"], ["git", "reset", "--quiet", "--hard", "@{upstream}"]):
-        result = subprocess.run(cmd, cwd=root, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RepoError(root, 1, f"{' '.join(cmd)}: {result.stderr.strip()}")
+def _cell(text: str) -> str:
+    return text.replace("|", "\\|").replace("\n", " ")
 
 
 @contextmanager

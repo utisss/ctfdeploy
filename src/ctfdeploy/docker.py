@@ -5,7 +5,7 @@ import subprocess
 import time
 
 from ctfdeploy.compose import published_ports
-from ctfdeploy.model import Challenge
+from ctfdeploy.model import STACK_PREFIX, Challenge
 from ctfdeploy.yamldoc import YamlDoc
 
 HEALTHY_TIMEOUT = 120
@@ -42,13 +42,6 @@ def remove(stack: str) -> str:
     return _docker("stack", "rm", stack)
 
 
-def prune_images() -> str:
-    """Remove compose-built images no container uses: on the host, old challenge versions."""
-    return _docker(
-        "image", "prune", "--all", "--force", "--filter", "label=com.docker.compose.project"
-    )  # fmt: skip
-
-
 def deployed_tags() -> dict[str, set[str]]:
     """The image tags each managed stack is running."""
     ids = _docker("service", "ls", "-q", "--filter", "label=com.docker.stack.namespace").split()
@@ -60,7 +53,7 @@ def deployed_tags() -> dict[str, set[str]]:
     stacks: dict[str, set[str]] = {}
     for line in out.splitlines():
         stack, image = line.split(" ", 1)
-        if stack.startswith("chall-"):
+        if stack.startswith(STACK_PREFIX):
             stacks.setdefault(stack, set()).add(image.split("@")[0].rpartition(":")[2])
     return stacks
 
@@ -95,6 +88,14 @@ def probe(challenge: Challenge, attempts: int = 10) -> str:
                     raise StepFailed(f"port {port}: {e.strerror or e}", "\n".join(log)) from e
                 time.sleep(1)
     return "\n".join(log)
+
+
+def logs(challenge: Challenge) -> str:
+    """Each service's tasks and recent output, for a failed CI run."""
+    out = [_tasks(challenge.stack)]
+    for service in _services(challenge.stack):
+        out.append(_docker("service", "logs", "--timestamps", "--tail", "200", service["name"]))
+    return "\n".join(out)
 
 
 def _services(stack: str) -> list[dict]:
@@ -163,10 +164,10 @@ def _run(cmd: list[str], challenge: Challenge, tag: str, failure: str) -> str:
         stderr=subprocess.STDOUT,
         text=True,
     )
-    log = "\n".join(line for line in result.stdout.splitlines() if line.strip())
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
     if result.returncode != 0:
-        raise StepFailed(f"{failure}: {log.rpartition(chr(10))[2].strip()}", log)
-    return log
+        raise StepFailed(f"{failure}: {lines[-1].strip() if lines else ''}", "\n".join(lines))
+    return "\n".join(lines)
 
 
 def _docker(*args: str) -> str:

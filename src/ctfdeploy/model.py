@@ -10,6 +10,7 @@ from ctfdeploy.yamldoc import YamlDoc
 META_FILE = "ctfs.yml"
 CHALLENGE_FILE = "challenge.yml"
 COMPOSE_FILES = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+STACK_PREFIX = "chall-"
 
 
 class RepoError(Exception):
@@ -18,6 +19,13 @@ class RepoError(Exception):
     def __init__(self, path: Path, line: int, message: str):
         super().__init__(message)
         self.path, self.line = path, line
+
+
+def git(root: Path, *args: str) -> str:
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RepoError(root, 1, f"git {' '.join(args)}: {result.stderr.strip()}")
+    return result.stdout
 
 
 @dataclass(frozen=True)
@@ -33,7 +41,7 @@ class Challenge:
 
     @property
     def stack(self) -> str:
-        return f"chall-{self.slug.lower()}"
+        return f"{STACK_PREFIX}{self.slug.lower()}"
 
     @property
     def name(self) -> str:
