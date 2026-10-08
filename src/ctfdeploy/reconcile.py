@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ctfdeploy import docker
+from ctfdeploy.check import check
 from ctfdeploy.ctfd import Ctfd, CtfdError
 from ctfdeploy.docker import StepFailed
 from ctfdeploy.model import CHALLENGE_FILE, Challenge, RepoError, load_repo
@@ -31,7 +32,9 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
         if fetch:
             _fetch(root)
         repo = load_repo(root)
-        desired = desired_events(repo.events, datetime.now(UTC))
+        now = datetime.now(UTC)
+        desired = desired_events(repo.events, now)
+        problems = check(repo, now)
         wanted = _wanted(desired.events)
         ids = {c["name"]: c["id"] for c in ctfd.get("/challenges?view=admin")}
         deployed = docker.deployed_tags()
@@ -41,7 +44,10 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
         for stack in sorted(deployed.keys() - hosted):
             _step(report, failures, stack, "removed", lambda s=stack: docker.remove(s))
 
-        outcomes = [_reconcile_one(ctfd, c, v, deployed, ids, report) for c, v in wanted]
+        outcomes = [
+            _reconcile_one(ctfd, c, v, deployed, ids, report, _problems_in(c, problems))
+            for c, v in wanted
+        ]
         failures |= {o.challenge.slug: o.failure for o in outcomes if o.failure}
 
         in_repo = {c.name for e in repo.events for c in e.challenges}
@@ -75,10 +81,38 @@ def _wanted(events) -> list[tuple[Challenge, bool]]:
 
 
 def _reconcile_one(
-    ctfd: Ctfd, challenge: Challenge, visible: bool, deployed: dict, ids: dict, report: Report
+    ctfd: Ctfd,
+    challenge: Challenge,
+    visible: bool,
+    deployed: dict,
+    ids: dict,
+    report: Report,
+    problems: list[Problem],
 ) -> Outcome:
+    """Deploy then sync one challenge. One that fails `check` is left as it is."""
     print(f"{challenge.slug}: reconciling", flush=True)
     outcome = Outcome(challenge, stack="—" if challenge.compose else "not hosted")
+    for problem in problems:
+        report.problem(problem, title=f"{challenge.slug}: check")
+    if problems:
+        outcome.failure = f"check: {problems[0].message}"
+    else:
+        _deploy_and_sync(ctfd, challenge, visible, deployed, ids, report, outcome)
+    mark = "✗" if outcome.failure else "✓"
+    detail = outcome.failure or f"{outcome.stack}, ctfd {outcome.ctfd}"
+    report.group(f"{mark} {challenge.slug}  {detail}", "\n".join(outcome.log))
+    return outcome
+
+
+def _deploy_and_sync(
+    ctfd: Ctfd,
+    challenge: Challenge,
+    visible: bool,
+    deployed: dict,
+    ids: dict,
+    report: Report,
+    outcome: Outcome,
+) -> None:
     phase, file = "deploy", challenge.compose
     try:
         if challenge.compose:
@@ -91,10 +125,10 @@ def _reconcile_one(
         outcome.failure = str(e)
         outcome.log.append(getattr(e, "log", ""))
         report.problem(Problem(file, 1, outcome.failure), title=f"{challenge.slug}: {phase}")
-    mark = "✗" if outcome.failure else "✓"
-    detail = outcome.failure or f"{outcome.stack}, ctfd {outcome.ctfd}"
-    report.group(f"{mark} {challenge.slug}  {detail}", "\n".join(outcome.log))
-    return outcome
+
+
+def _problems_in(challenge: Challenge, problems: list[Problem]) -> list[Problem]:
+    return [p for p in problems if p.path.is_relative_to(challenge.path)]
 
 
 def _deploy(challenge: Challenge, deployed: set[str] | None, log: list[str]) -> str:
