@@ -1,5 +1,6 @@
 import fcntl
 import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -16,6 +17,8 @@ from ctfdeploy.report import Report
 from ctfdeploy.schedule import desired_events
 from ctfdeploy.sync import link_next, sync_challenge, sync_config
 
+WORKERS = 4
+
 
 @dataclass
 class Outcome:
@@ -23,6 +26,7 @@ class Outcome:
     stack: str
     ctfd: str = ""
     cid: int | None = None
+    next_id: int | None = None
     phase: str = ""
     problems: list[Problem] = field(default_factory=list)
     log: list[str] = field(default_factory=list)
@@ -51,10 +55,10 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
             with _step(report, failures, stack):
                 report.group(f"✓ {stack}  removed", docker.remove(stack))
 
-        outcomes = []
-        for challenge, visible in wanted:
-            print(f"{challenge.slug}: reconciling", flush=True)
-            outcome = _reconcile_one(
+        def one(item: tuple[Challenge, bool]) -> Outcome:
+            challenge, visible = item
+            print(f"{challenge.slug}: reconciling\n", end="", flush=True)
+            return _reconcile_one(
                 ctfd,
                 challenge,
                 visible,
@@ -62,12 +66,17 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
                 ids.get(challenge.name),
                 [p for p in problems if p.path.is_relative_to(challenge.path)],
             )
-            if outcome.cid:
-                ids[challenge.name] = outcome.cid
-            if outcome.failure:
-                failures[challenge.slug] = outcome.failure
-            _report(report, outcome)
-            outcomes.append(outcome)
+
+        outcomes = []
+        with ThreadPoolExecutor(WORKERS) as pool:
+            for outcome in pool.map(one, wanted):
+                if outcome.cid:
+                    ids[outcome.challenge.name] = outcome.cid
+                if outcome.failure:
+                    failures[outcome.challenge.slug] = outcome.failure
+                _report(report, outcome)
+                outcomes.append(outcome)
+        next_ids = {o.cid: o.next_id for o in outcomes if o.cid}
 
         in_repo = {c.name for e in repo.events for c in e.challenges}
         for name in sorted((in_repo - {c.name for c, _ in wanted}) & ids.keys()):
@@ -76,7 +85,9 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
                 del ids[name]
                 report.group(f"✓ ctfd: {name}  deleted", "")
         with _step(report, failures, "ctfd: next"):
-            report.group("✓ ctfd: next  linked", link_next(ctfd, [c for c, _ in wanted], ids))
+            report.group(
+                "✓ ctfd: next  linked", link_next(ctfd, [c for c, _ in wanted], ids, next_ids)
+            )
         with _step(report, failures, "ctfd: config"):
             changed = sync_config(ctfd, repo, desired.config)
             report.group(f"✓ ctfd: config  {desired.config.name}", changed)
@@ -109,7 +120,10 @@ def _reconcile_one(
     cid: int | None,
     problems: list[Problem],
 ) -> Outcome:
-    """Deploy then sync one challenge. One that fails `check` is left as it is."""
+    """Deploy then sync one challenge. One that fails `check` is left as it is.
+
+    Runs on a worker thread, so it only reads shared state.
+    """
     outcome = Outcome(challenge, stack="—" if challenge.compose else "not hosted")
     if problems:
         outcome.phase, outcome.problems = "check", problems
@@ -119,7 +133,7 @@ def _reconcile_one(
             outcome.phase = "deploy"
             outcome.stack = _deploy(challenge, tags, outcome.log)
         outcome.phase = "ctfd"
-        outcome.cid, outcome.ctfd = sync_challenge(ctfd, challenge, visible, cid)
+        outcome.cid, outcome.ctfd, outcome.next_id = sync_challenge(ctfd, challenge, visible, cid)
     except StepFailed as e:
         file = challenge.compose if outcome.phase == "deploy" else challenge.path / CHALLENGE_FILE
         outcome.problems = [Problem(file, 1, str(e))]

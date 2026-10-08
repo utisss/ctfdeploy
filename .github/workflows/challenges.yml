@@ -31,6 +31,7 @@ jobs:
         with:
           path: repo
           fetch-depth: 0
+          filter: blob:none
       - &checkout-ctfdeploy
         uses: actions/checkout@v7
         with:
@@ -89,7 +90,6 @@ jobs:
 
   deploy:
     name: Deploy
-    needs: check
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)

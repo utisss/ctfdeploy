@@ -11,11 +11,15 @@ DYNAMIC = ("initial", "decay", "minimum", "function")
 
 def sync_challenge(
     ctfd: Ctfd, challenge: Challenge, visible: bool, cid: int | None
-) -> tuple[int, str]:
-    """Create or update one challenge. Returns its id and what changed, e.g. "state, flags"."""
+) -> tuple[int, str, int | None]:
+    """Create or update one challenge.
+
+    Returns its id, what changed, e.g. "state, flags", and its current `next_id`.
+    """
     body = _fields(challenge, visible)
     if cid is None:
-        cid = ctfd.post("/challenges", body)["id"]
+        current = ctfd.post("/challenges", body)
+        cid = current["id"]
         changed = ["created"]
     else:
         current = ctfd.get(f"/challenges/{cid}?view=admin")
@@ -26,15 +30,24 @@ def sync_challenge(
             ctfd.patch(f"/challenges/{cid}", {k: body[k] for k in changed})
     for sync in (_sync_flags, _sync_hints, _sync_tags, _sync_files):
         changed += sync(ctfd, cid, challenge)
-    return cid, ", ".join(changed) or "unchanged"
+    return cid, ", ".join(changed) or "unchanged", current.get("next_id")
 
 
-def link_next(ctfd: Ctfd, challenges: list[Challenge], ids: dict[str, int]) -> str:
-    """Point each challenge's `next` at its target, once every challenge exists."""
+def link_next(
+    ctfd: Ctfd, challenges: list[Challenge], ids: dict[str, int], next_ids: dict[int, int | None]
+) -> str:
+    """Point each challenge's `next` at its target, once every challenge exists.
+
+    `next_ids` holds the `next_id` already read for a challenge id; the rest are fetched.
+    """
     changed = []
     for challenge in challenges:
         cid, target = ids.get(challenge.name), ids.get(challenge.spec.get("next"))
-        if cid and ctfd.get(f"/challenges/{cid}?view=admin")["next_id"] != target:
+        if not cid:
+            continue
+        if cid not in next_ids:
+            next_ids[cid] = ctfd.get(f"/challenges/{cid}?view=admin")["next_id"]
+        if next_ids[cid] != target:
             ctfd.patch(f"/challenges/{cid}", {"next_id": target})
             changed.append(challenge.slug)
     return ", ".join(changed) or "unchanged"
