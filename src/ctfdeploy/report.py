@@ -3,6 +3,8 @@ from pathlib import Path
 
 from ctfdeploy.problem import Problem
 
+SUMMARY_MARKER = "::ctfdeploy-summary::"
+
 
 class Report:
     """Prints for a terminal, or with GitHub Actions workflow commands."""
@@ -35,6 +37,10 @@ class Report:
             print(title)
             if body.strip():
                 print("".join(f"    {line}\n" for line in body.rstrip().splitlines()), end="")
+
+    def summary(self, markdown: str) -> None:
+        """Markdown for the job summary, between markers the workflow cuts it out by."""
+        print(f"{SUMMARY_MARKER}\n{markdown}\n{SUMMARY_MARKER}")
 
 
 def _relative(path: Path, root: Path) -> str:

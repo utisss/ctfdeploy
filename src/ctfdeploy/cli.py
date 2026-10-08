@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,9 +8,11 @@ from pathlib import Path
 from ctfdeploy import docker
 from ctfdeploy.changed import changed_hosted
 from ctfdeploy.check import check
+from ctfdeploy.ctfd import Ctfd, CtfdError
 from ctfdeploy.docker import StepFailed
 from ctfdeploy.model import CHALLENGE_FILE, META_FILE, Challenge, RepoError, load_repo
 from ctfdeploy.problem import Problem
+from ctfdeploy.reconcile import reconcile
 from ctfdeploy.report import Report
 from ctfdeploy.solve import solve
 
@@ -48,6 +51,11 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_argument("path", nargs="?", type=Path, default=Path.cwd(), metavar="REPO")
     sub.set_defaults(func=cmd_changed)
 
+    sub = commands.add_parser("reconcile", help="make the host and CTFd match the repo")
+    sub.add_argument("--fetch", action="store_true", help="reset to the upstream branch first")
+    sub.add_argument("path", nargs="?", type=Path, default=Path.cwd(), metavar="REPO")
+    sub.set_defaults(func=cmd_reconcile)
+
     for phase, text in [
         ("build", "build a challenge's images"),
         ("up", "deploy a challenge's stack and wait until it is healthy"),
@@ -72,6 +80,18 @@ def cmd_changed(args, root: Path, report: Report) -> int:
     changed = changed_hosted(load_repo(root), datetime.now(UTC), args.base)
     print(json.dumps([c.dir.as_posix() for c in changed]))
     return 0
+
+
+def cmd_reconcile(args, root: Path, report: Report) -> int:
+    if "CTFD_TOKEN" not in os.environ:
+        report.error("CTFD_TOKEN is not set", title="reconcile")
+        return FATAL
+    ctfd = Ctfd(os.environ.get("CTFD_URL", "unix:/run/ctfd/ctfd.sock"), os.environ["CTFD_TOKEN"])
+    try:
+        return reconcile(root, ctfd, report, args.fetch)
+    except (CtfdError, StepFailed) as e:
+        report.error(str(e), title="reconcile")
+        return FATAL
 
 
 def cmd_phase(args, path: Path, report: Report) -> int:

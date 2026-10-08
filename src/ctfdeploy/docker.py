@@ -42,12 +42,21 @@ def remove(stack: str) -> str:
     return _docker("stack", "rm", stack)
 
 
+def prune_images() -> str:
+    """Remove compose-built images no container uses: on the host, old challenge versions."""
+    return _docker(
+        "image", "prune", "--all", "--force", "--filter", "label=com.docker.compose.project"
+    )  # fmt: skip
+
+
 def deployed_tags() -> dict[str, set[str]]:
     """The image tags each managed stack is running."""
-    out = _docker(
-        "service", "ls", "--filter", "label=com.docker.stack.namespace",
-        "--format", '{{.Label "com.docker.stack.namespace"}} {{.Image}}',
-    )  # fmt: skip
+    ids = _docker("service", "ls", "-q", "--filter", "label=com.docker.stack.namespace").split()
+    if not ids:
+        return {}
+    namespace = '{{index .Spec.Labels "com.docker.stack.namespace"}}'
+    image_ref = "{{.Spec.TaskTemplate.ContainerSpec.Image}}"
+    out = _docker("service", "inspect", *ids, "--format", f"{namespace} {image_ref}")
     stacks: dict[str, set[str]] = {}
     for line in out.splitlines():
         stack, image = line.split(" ", 1)
@@ -154,10 +163,10 @@ def _run(cmd: list[str], challenge: Challenge, tag: str, failure: str) -> str:
         stderr=subprocess.STDOUT,
         text=True,
     )
+    log = "\n".join(line for line in result.stdout.splitlines() if line.strip())
     if result.returncode != 0:
-        last = next((line for line in reversed(result.stdout.splitlines()) if line.strip()), "")
-        raise StepFailed(f"{failure}: {last.strip()}", result.stdout)
-    return result.stdout
+        raise StepFailed(f"{failure}: {log.rpartition(chr(10))[2].strip()}", log)
+    return log
 
 
 def _docker(*args: str) -> str:
