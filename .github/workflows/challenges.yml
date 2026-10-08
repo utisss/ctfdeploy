@@ -1,0 +1,122 @@
+name: challenges
+
+on:
+  workflow_call:
+    inputs:
+      host:
+        description: The CTF host `main` deploys to, e.g. ctf.isss.io. Also the GitHub environment
+          holding its DEPLOY_SSH_KEY secret and KNOWN_HOSTS variable.
+        type: string
+        required: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.changed.outputs.challenges }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: repo
+          fetch-depth: 0
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ctfdeploy
+      - uses: prefix-dev/setup-pixi@v0.11.0
+        with:
+          manifest-path: ctfdeploy/pixi.toml
+          pixi-version: v0.80.0
+          frozen: true
+          activate-environment: true
+      - name: Check
+        run: python -m ctfdeploy check repo
+      - name: Find changed challenges
+        id: changed
+        if: github.event_name == 'pull_request'
+        run: |
+          changed=$(python -m ctfdeploy changed "origin/$GITHUB_BASE_REF" repo)
+          echo "$changed"
+          echo "challenges=$changed" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test ${{ matrix.challenge }}
+    needs: check
+    if: needs.check.outputs.changed && needs.check.outputs.changed != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        challenge: ${{ fromJSON(needs.check.outputs.changed) }}
+    env:
+      CHALLENGE: repo/${{ matrix.challenge }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: repo
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: ctfdeploy
+      - uses: prefix-dev/setup-pixi@v0.11.0
+        with:
+          manifest-path: ctfdeploy/pixi.toml
+          pixi-version: v0.80.0
+          frozen: true
+          activate-environment: true
+      - uses: astral-sh/setup-uv@v10.2.0
+      - name: Set up swarm
+        run: docker swarm init
+      - name: Build
+        run: python -m ctfdeploy build "$CHALLENGE"
+      - name: Deploy
+        run: python -m ctfdeploy up "$CHALLENGE"
+      - name: Probe
+        run: python -m ctfdeploy probe "$CHALLENGE"
+      - name: Solve
+        if: hashFiles(format('repo/{0}/solve.py', matrix.challenge)) != ''
+        run: python -m ctfdeploy solve "$CHALLENGE"
+      - name: Service logs
+        if: failure()
+        run: |
+          stack="chall-$(basename "$CHALLENGE" | tr '[:upper:]' '[:lower:]')"
+          docker stack ps --no-trunc "$stack" || true
+          for service in $(docker stack services -q "$stack" 2>/dev/null); do
+            docker service logs --timestamps --tail 200 "$service"
+          done
+
+  deploy:
+    name: Deploy
+    needs: check
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ inputs.host }}
+      url: https://${{ inputs.host }}
+    concurrency:
+      group: deploy-${{ inputs.host }}
+    steps:
+      - name: Reconcile ${{ inputs.host }}
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ vars.KNOWN_HOSTS }}
+          HOST: ${{ inputs.host }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          (umask 077; echo "$SSH_KEY" > ~/.ssh/id_ed25519)
+          ssh -T "github-actions@$HOST" | tee reconcile.log
+      - name: Summary
+        if: always() && hashFiles('reconcile.log') != ''
+        run: |
+          sed -n '/^::ctfdeploy-summary::$/,/^::ctfdeploy-summary::$/{//!p}' reconcile.log \
+            >> "$GITHUB_STEP_SUMMARY"
