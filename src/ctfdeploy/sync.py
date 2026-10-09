@@ -1,4 +1,6 @@
 import hashlib
+import re
+import unicodedata
 from pathlib import Path
 
 from jinja2 import Template
@@ -138,7 +140,7 @@ def _sync_set(ctfd: Ctfd, cid: int, kind: str, wanted: list[dict], fields: tuple
 
 def _sync_files(ctfd: Ctfd, cid: int, challenge: Challenge) -> list[str]:
     paths = [challenge.path / name for name in challenge.spec.get("files") or []]
-    wanted = {(p.name, hashlib.sha1(p.read_bytes()).hexdigest()): p for p in paths}
+    wanted = {(_stored_name(p.name), hashlib.sha1(p.read_bytes()).hexdigest()): p for p in paths}
     current = {
         (Path(f["location"]).name, f["sha1sum"]): f["id"]
         for f in ctfd.get(f"/challenges/{cid}/files")
@@ -153,3 +155,9 @@ def _sync_files(ctfd: Ctfd, cid: int, challenge: Challenge) -> list[str]:
                 data={"challenge": cid, "type": "challenge"},
             )
     return ["files"] if current.keys() != wanted.keys() else []
+
+
+def _stored_name(name: str) -> str:
+    """The name CTFd stores an upload under: werkzeug's `secure_filename`."""
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Za-z0-9_.-]", "", "_".join(name.replace("/", " ").split())).strip("._")

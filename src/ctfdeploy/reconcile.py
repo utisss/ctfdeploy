@@ -143,7 +143,7 @@ def _reconcile_one(
 
 def _deploy(challenge: Challenge, tags: set[str] | None, log: list[str]) -> str:
     version = challenge.version()
-    if tags == {version}:
+    if tags and version in tags:
         return f"up to date {version}"
     log.append(docker.build(challenge, version))
     log.append(docker.deploy(challenge, version))

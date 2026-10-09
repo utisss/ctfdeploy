@@ -1,11 +1,12 @@
 from datetime import datetime
 
+import pytest
 from conftest import CHALLENGE
 
 from ctfdeploy import docker
 from ctfdeploy import reconcile as reconcile_module
 from ctfdeploy.model import load_repo
-from ctfdeploy.reconcile import _wanted, reconcile
+from ctfdeploy.reconcile import _deploy, _wanted, reconcile
 from ctfdeploy.report import Report
 from ctfdeploy.schedule import desired_events
 
@@ -72,3 +73,12 @@ class FixedNow(datetime):
     @classmethod
     def now(cls, tz=None):
         return datetime.fromisoformat("2026-10-02T19:00:00-05:00")
+
+
+def test_stack_with_a_stock_image_is_up_to_date(repo, monkeypatch):
+    repo.challenge("oct/web-db", port=7001)
+    challenge = load_repo(repo.root).events[1].challenges[0]
+    monkeypatch.setattr(challenge.__class__, "version", lambda self: "abc123")
+    monkeypatch.setattr(docker, "build", lambda *a: pytest.fail("rebuilt"))
+
+    assert _deploy(challenge, {"abc123", "10.11"}, []) == "up to date abc123"
