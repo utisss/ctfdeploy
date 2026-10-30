@@ -15,7 +15,7 @@ from ctfdeploy.notify import notify_changes
 from ctfdeploy.problem import Problem
 from ctfdeploy.report import Report
 from ctfdeploy.schedule import desired_events
-from ctfdeploy.sync import link_next, sync_challenge, sync_config
+from ctfdeploy.sync import link_next, remove_hint_awards, sync_challenge, sync_config
 
 WORKERS = 4
 
@@ -79,11 +79,16 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
         next_ids = {o.cid: o.next_id for o in outcomes if o.cid}
 
         in_repo = {c.name for e in repo.events for c in e.challenges}
+        deleted: set[str] = set()
         for name in sorted((in_repo - {c.name for c, _ in wanted}) & ids.keys()):
             with _step(report, failures, f"ctfd: {name}"):
                 ctfd.delete(f"/challenges/{ids[name]}")
                 del ids[name]
+                deleted.add(name)
                 report.group(f"✓ ctfd: {name}  deleted", "")
+        if deleted:
+            with _step(report, failures, "ctfd: hint awards"):
+                report.group("✓ ctfd: hint awards  removed", remove_hint_awards(ctfd, deleted))
         with _step(report, failures, "ctfd: next"):
             report.group(
                 "✓ ctfd: next  linked", link_next(ctfd, [c for c, _ in wanted], ids, next_ids)

@@ -55,6 +55,20 @@ def link_next(
     return ", ".join(changed) or "unchanged"
 
 
+def remove_hint_awards(ctfd: Ctfd, challenges: set[str]) -> str:
+    """Delete the awards CTFd creates when a team unlocks a hint on one of `challenges`."""
+    descriptions = {f"Hint for {name}" for name in challenges}
+    awards = ctfd.get("/awards")  # unpaginated
+    hint_awards = [
+        a
+        for a in awards
+        if str(a.get("category", "")).lower() == "hints" and a["description"] in descriptions
+    ]
+    for award in hint_awards:
+        ctfd.delete(f"/awards/{award['id']}")
+    return f"{len(hint_awards)} awards" if hint_awards else "none"
+
+
 def sync_config(ctfd: Ctfd, repo: Repo, event: Event) -> str:
     """CTFd's name, start, freeze and homepage follow `event`. The board never closes."""
     wanted = {
