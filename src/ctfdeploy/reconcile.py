@@ -79,16 +79,17 @@ def reconcile(root: Path, ctfd: Ctfd, report: Report, fetch: bool) -> int:
         next_ids = {o.cid: o.next_id for o in outcomes if o.cid}
 
         in_repo = {c.name for e in repo.events for c in e.challenges}
-        deleted: set[str] = set()
-        for name in sorted((in_repo - {c.name for c, _ in wanted}) & ids.keys()):
+        stale = in_repo - {c.name for c, _ in wanted}
+        for name in sorted(stale & ids.keys()):
             with _step(report, failures, f"ctfd: {name}"):
                 ctfd.delete(f"/challenges/{ids[name]}")
                 del ids[name]
-                deleted.add(name)
                 report.group(f"✓ ctfd: {name}  deleted", "")
-        if deleted:
+        cleanup = stale - ids.keys()
+        if cleanup:
+            # Remove hint awards for stale challenges (in the repo but not for the current event) that no longer exist in ctfd
             with _step(report, failures, "ctfd: hint awards"):
-                report.group("✓ ctfd: hint awards  removed", remove_hint_awards(ctfd, deleted))
+                report.group("✓ ctfd: hint awards  removed", remove_hint_awards(ctfd, cleanup))
         with _step(report, failures, "ctfd: next"):
             report.group(
                 "✓ ctfd: next  linked", link_next(ctfd, [c for c, _ in wanted], ids, next_ids)
